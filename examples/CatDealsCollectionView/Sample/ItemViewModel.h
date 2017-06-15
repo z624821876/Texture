@@ -22,8 +22,9 @@
 
 @interface ItemViewModel : NSObject
 
-+ (instancetype)randomItem;
++ (ItemViewModel *)randomItem;
 
+@property (nonatomic, readonly) NSInteger identifier;
 @property (nonatomic, copy) NSString *titleText;
 @property (nonatomic, copy) NSString *firstInfoText;
 @property (nonatomic, copy) NSString *secondInfoText;

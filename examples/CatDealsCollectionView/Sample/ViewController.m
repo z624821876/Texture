@@ -56,6 +56,7 @@ static const CGFloat kHorizontalSectionPadding = 10.0f;
     _collectionNode.dataSource = self;
     _collectionNode.delegate = self;
     _collectionNode.backgroundColor = [UIColor grayColor];
+    _collectionNode.accessibilityIdentifier = @"Cat deals list";
     
     ASRangeTuningParameters preloadTuning;
     preloadTuning.leadingBufferScreenfuls = 2;
@@ -96,12 +97,10 @@ static const CGFloat kHorizontalSectionPadding = 10.0f;
       ViewController *strongSelf = weakSelf;
       if (strongSelf != nil)
       {
-        NSLog(@"ViewController is not nil");
         [strongSelf appendMoreItems:kBatchSize completion:completion];
-        NSLog(@"ViewController finished updating collectionView");
       }
       else {
-        NSLog(@"ViewController is nil - won't update collectionView");
+        NSLog(@"ViewController is nil - won't update collection");
       }
     };
     
@@ -113,13 +112,11 @@ static const CGFloat kHorizontalSectionPadding = 10.0f;
 
 - (void)appendMoreItems:(NSInteger)numberOfNewItems completion:(void (^)(BOOL))completion {
   NSArray *newData = [self getMoreData:numberOfNewItems];
-  dispatch_async(dispatch_get_main_queue(), ^{
-    [_collectionNode performBatchAnimated:YES updates:^{
-      [_data addObjectsFromArray:newData];
-      NSArray *addedIndexPaths = [self indexPathsForObjects:newData];
-      [_collectionNode insertItemsAtIndexPaths:addedIndexPaths];
-    } completion:completion];
-  });
+  [_collectionNode performBatchAnimated:YES updates:^{
+    [_data addObjectsFromArray:newData];
+    NSArray *addedIndexPaths = [self indexPathsForObjects:newData];
+    [_collectionNode insertItemsAtIndexPaths:addedIndexPaths];
+  } completion:completion];
 }
 
 - (NSArray *)getMoreData:(NSInteger)count {
@@ -196,7 +193,6 @@ static const CGFloat kHorizontalSectionPadding = 10.0f;
 
 - (void)collectionNode:(ASCollectionNode *)collectionNode willBeginBatchFetchWithContext:(ASBatchContext *)context
 {
-  NSLog(@"fetch additional content");
   [self fetchMoreCatsWithCompletion:^(BOOL finished){
     [context completeBatchFetching:YES];
   }];

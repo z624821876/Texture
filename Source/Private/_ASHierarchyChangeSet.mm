@@ -612,7 +612,9 @@ NSString *NSStringFromASHierarchyChangeType(_ASHierarchyChangeType changeType)
 - (NSMutableArray<NSDictionary *> *)propertiesForDescription
 {
   NSMutableArray<NSDictionary *> *result = [NSMutableArray array];
-  [result addObject:@{ @"includesReloadData" : @(_includesReloadData) }];
+  if (_includesReloadData) {
+    [result addObject:@{ @"includesReloadData" : @"YES" }];
+  }
   if (_reloadSectionChanges.count > 0) {
     [result addObject:@{ @"reloadSections" : [_ASHierarchySectionChange smallDescriptionForSectionChanges:_reloadSectionChanges] }];
   }

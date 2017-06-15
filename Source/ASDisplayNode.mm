@@ -41,17 +41,13 @@
 #import <AsyncDisplayKit/ASLayoutElementStylePrivate.h>
 #import <AsyncDisplayKit/ASLayoutSpec.h>
 #import <AsyncDisplayKit/ASLayoutSpecPrivate.h>
+#import <AsyncDisplayKit/ASLog.h>
 #import <AsyncDisplayKit/ASRunLoopQueue.h>
+#import <AsyncDisplayKit/ASSignpost.h>
 #import <AsyncDisplayKit/ASTraitCollection.h>
 #import <AsyncDisplayKit/ASWeakProxy.h>
 #import <AsyncDisplayKit/ASResponderChainEnumerator.h>
 #import <AsyncDisplayKit/ASTipsController.h>
-
-#if ASDisplayNodeLoggingEnabled
-  #define LOG(...) NSLog(__VA_ARGS__)
-#else
-  #define LOG(...)
-#endif
 
 // Conditionally time these scopes to our debug ivars (only exist in debug/profile builds)
 #if TIME_DISPLAYNODE_OPS
@@ -452,10 +448,10 @@ static ASDisplayNodeMethodOverrides GetASDisplayNodeMethodOverrides(Class c)
   for (Ivar ivar : ivars) {
     id value = object_getIvar(self, ivar);
     if (ASClassRequiresMainThreadDeallocation(object_getClass(value))) {
-      LOG(@"Trampolining ivar '%s' value %@ for main deallocation.", ivar_getName(ivar), value);
+      as_log_debug(ASMainThreadDeallocationLog(), "%@: Trampolining ivar '%s' value %@ for main deallocation.", self, ivar_getName(ivar), value);
       ASPerformMainThreadDeallocation(value);
     } else {
-      LOG(@"Not trampolining ivar '%s' value %@.", ivar_getName(ivar), value);
+      as_log_debug(ASMainThreadDeallocationLog(), "%@: Not trampolining ivar '%s' value %@.", self, ivar_getName(ivar), value);
     }
   }
 }
@@ -512,16 +508,16 @@ static ASDisplayNodeMethodOverrides GetASDisplayNodeMethodOverrides(Class c)
       // If it's `id` we have to include it just in case.
       resultIvars[resultCount] = ivar;
       resultCount += 1;
-      LOG(@"Marking ivar '%s' for possible main deallocation due to type id", ivar_getName(ivar));
+      as_log_debug(ASMainThreadDeallocationLog(), "%@: Marking ivar '%s' for possible main deallocation due to type id", self, ivar_getName(ivar));
     } else {
       // If it's an ivar with a static type, check the type.
       Class c = ASGetClassFromType(type);
       if (ASClassRequiresMainThreadDeallocation(c)) {
         resultIvars[resultCount] = ivar;
         resultCount += 1;
-        LOG(@"Marking ivar '%s' for main deallocation due to class %@", ivar_getName(ivar), c);
+        as_log_debug(ASMainThreadDeallocationLog(), "%@: Marking ivar '%s' for main deallocation due to class %@", self, ivar_getName(ivar), c);
       } else {
-        LOG(@"Skipping ivar '%s' for main deallocation.", ivar_getName(ivar));
+        as_log_debug(ASMainThreadDeallocationLog(), "%@: Skipping ivar '%s' for main deallocation.", self, ivar_getName(ivar));
       }
     }
   }
@@ -629,6 +625,7 @@ static ASDisplayNodeMethodOverrides GetASDisplayNodeMethodOverrides(Class c)
   ASDisplayNodeAssertMainThread();
   ASDisplayNodeAssertLockUnownedByCurrentThread(__instanceLock__);
   ASDisplayNodeLogEvent(self, @"didLoad");
+  as_log_verbose(ASNodeLog(), "didLoad %@", self);
   TIME_SCOPED(_debugTimeForDidLoad);
   
   [self didLoad];
@@ -914,7 +911,7 @@ static ASDisplayNodeMethodOverrides GetASDisplayNodeMethodOverrides(Class c)
       // Performing layout on a zero-bounds view often results in frame calculations
       // with negative sizes after applying margins, which will cause
       // measureWithSizeRange: on subnodes to assert.
-      LOG(@"Warning: No size given for node before node was trying to layout itself: %@. Please provide a frame for the node.", self);
+      as_log_debug(OS_LOG_DISABLED, "Warning: No size given for node before node was trying to layout itself: %@. Please provide a frame for the node.", self);
       return;
     }
     
@@ -962,11 +959,14 @@ static ASDisplayNodeMethodOverrides GetASDisplayNodeMethodOverrides(Class c)
   // This is fast enough to do it unconditionally.
   auto key = ASPthreadStaticKey(NULL);
   BOOL isRootCall = (pthread_getspecific(key) == NULL);
+  os_activity_t activity = NULL;
   if (isRootCall) {
+    activity = as_activity_create_verbose("Calculate node layout", OS_ACTIVITY_CURRENT, OS_ACTIVITY_FLAG_DEFAULT);
     pthread_setspecific(key, kCFBooleanTrue);
     ASSignpostStart(ASSignpostCalculateLayout);
   }
 
+  as_activity_scope(activity);
   ASSizeRange styleAndParentSize = ASLayoutElementSizeResolve(self.style.size, parentSize);
   const ASSizeRange resolvedRange = ASSizeRangeIntersect(constrainedSize, styleAndParentSize);
   ASLayout *result = [self calculateLayoutThatFits:resolvedRange];
@@ -975,6 +975,7 @@ static ASDisplayNodeMethodOverrides GetASDisplayNodeMethodOverrides(Class c)
     pthread_setspecific(key, NULL);
     ASSignpostEnd(ASSignpostCalculateLayout);
   }
+  as_log_verbose(ASLayoutLog(), "calculateLayout %@ sizeRange %@ -> %@", self, NSStringFromASSizeRange(constrainedSize), NSStringFromCGSize(result.size));
   return result;
 }
 
@@ -1304,6 +1305,7 @@ NSString * const ASRenderingEngineDidDisplayNodesScheduledBeforeTimestamp = @"AS
     }];
   });
 
+  as_log_verbose(ASRenderLog(), "%s %@", sel_getName(_cmd), node);
   [renderQueue enqueue:node];
 }
 
@@ -2682,7 +2684,7 @@ ASDISPLAYNODE_INLINE BOOL subtreeIsRasterized(ASDisplayNode *node) {
   if (interfaceState == ASInterfaceStateNone) {
     return; // This method is a no-op with a 0-bitfield argument, so don't bother recursing.
   }
-  ASDisplayNodeLogEvent(self, @"%@ %@", NSStringFromSelector(_cmd), NSStringFromASInterfaceState(interfaceState));
+  ASDisplayNodeLogEvent(self, @"%s %@", sel_getName(_cmd), NSStringFromASInterfaceState(interfaceState));
   ASDisplayNodePerformBlockOnEveryNode(nil, self, YES, ^(ASDisplayNode *node) {
     node.interfaceState &= (~interfaceState);
   });
@@ -2690,6 +2692,16 @@ ASDISPLAYNODE_INLINE BOOL subtreeIsRasterized(ASDisplayNode *node) {
 
 - (void)recursivelySetInterfaceState:(ASInterfaceState)newInterfaceState
 {
+  as_activity_scope(as_activity_create("Recursively set interface state", OS_ACTIVITY_CURRENT, OS_ACTIVITY_FLAG_DEFAULT));
+
+  // Log this change, unless it's just the node going from {} -> {Measure} because that change happens
+  // for all cell nodes and it isn't currently meaningful.
+  auto oldState = self.interfaceState;
+  BOOL isJustEnteringMeasure = (oldState == ASInterfaceStateNone && newInterfaceState == ASInterfaceStateMeasureLayout);
+  if (!isJustEnteringMeasure) {
+    as_log_verbose(ASNodeLog(), "interfaceState %@ %@", NSStringFromASInterfaceStateChange(oldState, newInterfaceState), self);
+  }
+
   // Instead of each node in the recursion assuming it needs to schedule itself for display,
   // setInterfaceState: skips this when handling range-managed nodes (our whole subtree has this set).
   // If our range manager intends for us to be displayed right now, and didn't before, get started!
@@ -2813,7 +2825,8 @@ ASDISPLAYNODE_INLINE BOOL subtreeIsRasterized(ASDisplayNode *node) {
     }
   }
 
-  ASDisplayNodeLogEvent(self, @"interfaceStateDidChange: %@, old: %@", NSStringFromASInterfaceState(newState), NSStringFromASInterfaceState(oldState));
+  as_log_verbose(ASNodeLog(), "%s %@ %@", sel_getName(_cmd), self, NSStringFromASInterfaceStateChange(oldState, newState));
+  ASDisplayNodeLogEvent(self, @"interfaceStateDidChange: %@", NSStringFromASInterfaceStateChange(oldState, newState));
   [self interfaceStateDidChange:newState fromState:oldState];
 }
 
@@ -3165,10 +3178,48 @@ ASDISPLAYNODE_INLINE BOOL subtreeIsRasterized(ASDisplayNode *node) {
 
 - (NSMutableArray<NSDictionary *> *)propertiesForDescription
 {
+  ASPushMainThreadAssertionsDisabled();
+
   NSMutableArray<NSDictionary *> *result = [NSMutableArray array];
-  if (self.debugName.length > 0) {
-    [result addObject:@{ @"debugName" : ASStringWithQuotesIfMultiword(self.debugName) }];
+  NSString *debugName = self.debugName;
+  if (debugName.length == 0) {
+    debugName = nil;
   }
+
+  static NSInteger const kMaxLength = 10;
+  NSString *axId = self.accessibilityIdentifier;
+  NSInteger axIdLength = axId.length;
+  if (axIdLength == 0) {
+    axId = nil;
+  } else if (axIdLength > kMaxLength) {
+    axId = [axId substringToIndex:kMaxLength];
+  }
+
+  if (debugName) {
+    [result addObject:@{ (id)kCFNull : ASStringWithQuotesIfMultiword(debugName) }];
+  }
+  if (axId) {
+    [result addObject:@{ (id)kCFNull : ASStringWithQuotesIfMultiword(axId) }];
+  }
+
+  if (result.count == 0) {
+    // We have no debugName, no axId. Try to use text.
+    NSString *text;
+    if ([self respondsToSelector:@selector(attributedText)]) {
+      text = [(id)self attributedText].string;
+    }
+
+    // Truncate if text too long. Needs to be very short.
+    if (text.length > kMaxLength) {
+      text = [text substringToIndex:kMaxLength];
+    }
+    if (text.length > 0) {
+      [result addObject:@{ (id)kCFNull : ASStringWithQuotesIfMultiword(text) }];
+    }
+  }
+
+
+  ASPopMainThreadAssertionsDisabled();
   return result;
 }
 
@@ -3179,7 +3230,10 @@ ASDISPLAYNODE_INLINE BOOL subtreeIsRasterized(ASDisplayNode *node) {
   if (self.debugName.length > 0) {
     [result addObject:@{ @"debugName" : ASStringWithQuotesIfMultiword(self.debugName)}];
   }
-  
+  if (self.accessibilityIdentifier.length > 0) {
+    [result addObject:@{ @"axId": ASStringWithQuotesIfMultiword(self.accessibilityIdentifier) }];
+  }
+
   CGRect windowFrame = [self _frameInWindow];
   if (CGRectIsNull(windowFrame) == NO) {
     [result addObject:@{ @"frameInWindow" : [NSValue valueWithCGRect:windowFrame] }];
